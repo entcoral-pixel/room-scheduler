@@ -15,6 +15,79 @@
         </div>
       </form>
     </section>
+
+    <section style="margin-bottom: 2rem">
+      <h2>Book a room</h2>
+      <form method="post" action="{{ url_for('main.add_booking') }}">
+        <label for="room_id">Room</label>
+        <select id="room_id" name="room_id" required style="max-width: 24rem; width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #cbd5e1; border-radius: 0.375rem;">
+          <option value="">Select a room</option>
+          {% for r in rooms %}
+            <option value="{{ r.id }}">{{ r.name }}</option>
+          {% endfor %}
+        </select>
+
+        <label for="day" style="margin-top: 1rem">Day</label>
+        <input id="day" name="day" type="date" required />
+
+        <label for="start_time" style="margin-top: 1rem">Start time</label>
+        <input id="start_time" name="start_time" type="time" required />
+
+        <label for="end_time" style="margin-top: 1rem">End time</label>
+        <input id="end_time" name="end_time" type="time" required />
+
+        <div style="margin-top: 0.75rem">
+          <button type="submit">Add booking</button>
+        </div>
+      </form>
+    </section>
+
+    <section style="margin-bottom: 2rem">
+      <h2>My bookings</h2>
+
+      <form method="get" action="{{ url_for('main.index') }}" style="margin-bottom: 0.75rem">
+        <input type="hidden" name="bookings_mode" value="all" />
+        <button type="submit">Show all my bookings</button>
+      </form>
+
+      <form method="get" action="{{ url_for('main.index') }}" style="max-width: 24rem; margin-bottom: 1rem">
+        <input type="hidden" name="bookings_mode" value="room" />
+        <label for="bookings_room_id">Show my bookings for a room</label>
+        <select id="bookings_room_id" name="bookings_room_id" required style="max-width: 24rem; width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #cbd5e1; border-radius: 0.375rem;">
+          <option value="">Select a room</option>
+          {% for r in rooms %}
+            <option value="{{ r.id }}" {% if bookings_room_id == r.id %}selected{% endif %}>{{ r.name }}</option>
+          {% endfor %}
+        </select>
+        <div style="margin-top: 0.75rem">
+          <button type="submit" class="secondary">Filter by room</button>
+        </div>
+      </form>
+
+      {% if bookings_mode in ['all', 'room'] %}
+        {% if bookings %}
+          <ul class="rooms">
+            {% for b in bookings %}
+              <li>
+                <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center">
+                  <div>
+                    <strong>{{ b.room_name }}</strong>
+                    <div>{{ b.day }} | {{ b.start_time }} - {{ b.end_time }}</div>
+                  </div>
+                  <form method="post" action="{{ url_for('main.delete_booking', room_id=b.room_id, day_id=b.day, booking_id=b.id) }}">
+                    <input type="hidden" name="bookings_mode" value="{{ bookings_mode }}" />
+                    <input type="hidden" name="bookings_room_id" value="{{ bookings_room_id or '' }}" />
+                    <button type="submit" class="secondary">Delete</button>
+                  </form>
+                </div>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p>No bookings found for this view.</p>
+        {% endif %}
+      {% endif %}
+    </section>
   {% endif %}
 
   <section>

@@ -90,6 +90,11 @@ def list_rooms() -> list[dict[str, Any]]:
     return rooms
 
 
+def room_exists(room_id: str) -> bool:
+    db = get_client()
+    return db.collection("rooms").document(room_id).get().exists
+
+
 def get_or_create_day(room_id: str, day: date) -> firestore.DocumentReference:
     db = get_client()
     day_id = day.isoformat()
@@ -128,3 +133,69 @@ def create_booking(
         }
     )
     return booking_ref.id
+
+
+def list_user_bookings(user_id: str, room_id: str | None = None) -> list[dict[str, Any]]:
+    db = get_client()
+    rooms_query = db.collection("rooms")
+    rooms_stream = (
+        [rooms_query.document(room_id).get()] if room_id else rooms_query.stream()
+    )
+
+    bookings: list[dict[str, Any]] = []
+    for room_doc in rooms_stream:
+        if not room_doc.exists:
+            continue
+
+        room_data = room_doc.to_dict() or {}
+        room_name = room_data.get("name", "")
+        day_docs = room_doc.reference.collection("days").stream()
+        for day_doc in day_docs:
+            day_data = day_doc.to_dict() or {}
+            day_value = day_data.get("date", day_doc.id)
+            booking_docs = day_doc.reference.collection("bookings").stream()
+            for booking_doc in booking_docs:
+                booking_data = booking_doc.to_dict() or {}
+                if booking_data.get("created_by") != user_id:
+                    continue
+                bookings.append(
+                    {
+                        "id": booking_doc.id,
+                        "room_id": room_doc.id,
+                        "room_name": room_name,
+                        "day": day_value,
+                        "start_time": booking_data.get("start_time", ""),
+                        "end_time": booking_data.get("end_time", ""),
+                    }
+                )
+
+    bookings.sort(key=lambda booking: (booking["day"], booking["start_time"], booking["room_name"]))
+    return bookings
+
+
+def delete_booking_for_user(
+    *,
+    room_id: str,
+    day_id: str,
+    booking_id: str,
+    user_id: str,
+) -> bool:
+    db = get_client()
+    booking_ref = (
+        db.collection("rooms")
+        .document(room_id)
+        .collection("days")
+        .document(day_id)
+        .collection("bookings")
+        .document(booking_id)
+    )
+    booking_doc = booking_ref.get()
+    if not booking_doc.exists:
+        return False
+
+    booking_data = booking_doc.to_dict() or {}
+    if booking_data.get("created_by") != user_id:
+        raise PermissionError("You can only delete your own bookings.")
+
+    booking_ref.delete()
+    return True
