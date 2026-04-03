@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Log in — Room Scheduler{% endblock %}
+{% block content %}
+  <h1>Log in</h1>
+  <p>Choose Google (Gmail) sign in or use email/password to sign in or sign up.</p>
+  <div style="margin-bottom: 1rem">
+    <button id="google-signin-btn" type="button">Continue with Google</button>
+  </div>
+  <form id="login-form" style="max-width: 24rem">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" required />
+    <label for="password" style="margin-top: 1rem">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required />
+    <div style="margin-top: 1rem; display: flex; gap: 0.75rem">
+      <button type="submit">Sign in</button>
+      <button id="signup-btn" type="button" class="secondary">Sign up</button>
+    </div>
+  </form>
+  <p id="login-error" class="flash error" style="display: none; margin-top: 1rem"></p>
+{% endblock %}
+{% block scripts %}
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="{{ url_for('static', filename='js/firebase-login.js') }}"></script>
+  <script>
+    async function withErrorHandling(action) {
+      const err = document.getElementById("login-error");
+      err.style.display = "none";
+      try {
+        await action();
+      } catch (ex) {
+        err.textContent = ex.message || "Authentication failed";
+        err.style.display = "block";
+      }
+    }
+
+    document.getElementById("login-form").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      await withErrorHandling(async function () {
+        await window.firebaseLogin.signInWithEmailPassword(
+          document.getElementById("email").value.trim(),
+          document.getElementById("password").value
+        );
+      });
+    });
+
+    document.getElementById("signup-btn").addEventListener("click", async function () {
+      await withErrorHandling(async function () {
+        await window.firebaseLogin.signUpWithEmailPassword(
+          document.getElementById("email").value.trim(),
+          document.getElementById("password").value
+        );
+      });
+    });
+
+    document.getElementById("google-signin-btn").addEventListener("click", async function () {
+      await withErrorHandling(async function () {
+        await window.firebaseLogin.signInWithGoogle();
+      });
+    });
+  </script>
+{% endblock %}

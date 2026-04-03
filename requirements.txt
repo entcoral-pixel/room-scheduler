@@ -1,0 +1,4 @@
+Flask>=3.0,<4
+gunicorn>=22,<23
+google-cloud-firestore>=2.14,<3
+firebase-admin>=6.4,<7

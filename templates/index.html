@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Rooms — Room Scheduler{% endblock %}
+{% block content %}
+  <h1>Rooms</h1>
+  <p>Rooms are shared by everyone. Sign in to add a room.</p>
+
+  {% if session.get('uid') %}
+    <section style="margin-bottom: 2rem">
+      <h2>Add a room</h2>
+      <form method="post" action="{{ url_for('main.add_room') }}">
+        <label for="name">Room name</label>
+        <input id="name" name="name" type="text" required maxlength="200" autocomplete="off" />
+        <div style="margin-top: 0.75rem">
+          <button type="submit">Add room</button>
+        </div>
+      </form>
+    </section>
+  {% endif %}
+
+  <section>
+    <h2>Available rooms</h2>
+    {% if rooms %}
+      <ul class="rooms">
+        {% for r in rooms %}
+          <li><strong>{{ r.name }}</strong></li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>No rooms yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}
+{% block scripts %}
+  {% if session.get('uid') %}
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script src="{{ url_for('static', filename='js/firebase-login.js') }}"></script>
+    <script>
+      document.getElementById("logout-btn").addEventListener("click", function () {
+        window.firebaseLogin.signOut();
+      });
+    </script>
+  {% endif %}
+{% endblock %}
