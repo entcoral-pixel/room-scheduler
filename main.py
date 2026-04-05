@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import uuid
@@ -43,7 +42,6 @@ def _firestore_database_id() -> str:
 
 
 def _firestore_client() -> firestore.Client:
-    
     return firebase_firestore.client(database_id=_firestore_database_id())
 
 
@@ -84,6 +82,30 @@ def room_name_exists(normalized: str) -> bool:
         if str(data.get("name", "")).strip().casefold() == target:
             return True
     return False
+
+
+def room_creator_uid(room_data: dict[str, Any]) -> str | None:
+    uid = room_data.get("created_by_uid")
+    if uid:
+        return str(uid)
+    c = room_data.get("created_by")
+    return str(c) if c else None
+
+
+def room_has_any_bookings(room_id: str) -> bool:
+    for day_doc in days_collection(room_id).stream():
+        for _ in bookings_collection(room_id, day_doc.id).limit(1).stream():
+            return True
+    return False
+
+
+def delete_room_cascade(room_id: str) -> None:
+    for day_doc in days_collection(room_id).stream():
+        day_id = day_doc.id
+        for b in bookings_collection(room_id, day_id).stream():
+            b.reference.delete()
+        day_doc.reference.delete()
+    rooms_collection().document(room_id).delete()
 
 
 def _time_to_minutes(t: str) -> int:
@@ -153,9 +175,10 @@ def get_user_bookings_all(user_id: str) -> list[dict[str, Any]]:
 
 
 def get_user_bookings_for_room(user_id: str, room_id: str) -> list[dict[str, Any]]:
-    room_name = _get_room_name(room_id)
-    if not room_name and not rooms_collection().document(room_id).get().exists:
+    room_snap = rooms_collection().document(room_id).get()
+    if not room_snap.exists:
         return []
+    room_name = str((room_snap.to_dict() or {}).get("name", ""))
     out: list[dict[str, Any]] = []
     for day_doc in days_collection(room_id).stream():
         day_id = day_doc.id
@@ -175,6 +198,65 @@ def get_user_bookings_for_room(user_id: str, room_id: str) -> list[dict[str, Any
             )
     out.sort(key=lambda r: (r["day_id"], r["start_time"]))
     return out
+
+
+def update_user_booking(
+    uid: str,
+    room_id: str,
+    old_day_id: str,
+    booking_id: str,
+    new_day_id: str,
+    start_t: str,
+    end_t: str,
+) -> tuple[bool, str]:
+    ref = bookings_collection(room_id, old_day_id).document(booking_id)
+    snap = ref.get()
+    if not snap.exists:
+        return False, "Booking not found."
+    data = snap.to_dict() or {}
+    if data.get("user_id") != uid:
+        return False, "You can only edit your own bookings."
+    if not rooms_collection().document(room_id).get().exists:
+        return False, "That room no longer exists."
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", new_day_id):
+        return False, "Invalid date."
+    try:
+        sm = _time_to_minutes(start_t)
+        em = _time_to_minutes(end_t)
+    except ValueError:
+        return False, "Invalid start or end time."
+    if em <= sm:
+        return False, "End time must be after start time."
+
+    start_norm = _normalize_time_display(start_t)
+    end_norm = _normalize_time_display(end_t)
+
+    if new_day_id == old_day_id:
+        if booking_clashes_room_day(
+            room_id, old_day_id, sm, em, exclude_booking_id=booking_id
+        ):
+            return False, "That time overlaps another booking for this room."
+        ref.update({"start_time": start_norm, "end_time": end_norm})
+        return True, ""
+
+    if booking_clashes_room_day(room_id, new_day_id, sm, em, None):
+        return False, "That time overlaps another booking for this room."
+
+    payload: dict[str, Any] = {
+        "user_id": uid,
+        "start_time": start_norm,
+        "end_time": end_norm,
+    }
+    ca = data.get("created_at")
+    payload["created_at"] = ca if ca is not None else SERVER_TIMESTAMP
+
+    ensure_day_document(room_id, new_day_id)
+    new_ref = bookings_collection(room_id, new_day_id).document()
+    batch = _firestore_client().batch()
+    batch.set(new_ref, payload)
+    batch.delete(ref)
+    batch.commit()
+    return True, ""
 
 
 def login_required(view):
@@ -233,11 +315,23 @@ def login():
 
 @main_bp.route("/")
 def index():
+    uid = session.get("uid")
     room_docs: list[dict[str, Any]] = []
     try:
         for doc in rooms_collection().stream():
             data = doc.to_dict() or {}
-            room_docs.append({"id": doc.id, "name": data.get("name", "")})
+            rid = doc.id
+            creator = room_creator_uid(data)
+            can_delete = False
+            if uid and creator and creator == uid:
+                can_delete = not room_has_any_bookings(rid)
+            room_docs.append(
+                {
+                    "id": rid,
+                    "name": data.get("name", ""),
+                    "can_delete": can_delete,
+                }
+            )
     except Exception as ex:
         err = str(ex).strip() or type(ex).__name__
         flash(f"Could not load rooms: {err}{_firestore_auth_hint(err)}", "error")
@@ -246,7 +340,6 @@ def index():
     bookings: list[dict[str, Any]] = []
     bookings_mode = (request.args.get("bookings_mode") or "").strip()
     bookings_room_id = (request.args.get("bookings_room_id") or "").strip()
-    uid = session.get("uid")
     if uid:
         try:
             if bookings_mode == "all":
@@ -288,6 +381,31 @@ def add_room():
         }
     )
     flash("Room added.", "success")
+    return redirect(url_for("main.index"))
+
+
+@main_bp.route("/rooms/<room_id>/delete", methods=["POST"])
+@login_required
+def delete_room(room_id: str):
+    room_id = (room_id or "").strip()
+    if not room_id:
+        flash("Invalid room.", "error")
+        return redirect(url_for("main.index"))
+    ref = rooms_collection().document(room_id)
+    snap = ref.get()
+    if not snap.exists:
+        flash("Room not found.", "error")
+        return redirect(url_for("main.index"))
+    data = snap.to_dict() or {}
+    creator = room_creator_uid(data)
+    if not creator or creator != session["uid"]:
+        flash("You can only delete rooms you created.", "error")
+        return redirect(url_for("main.index"))
+    if room_has_any_bookings(room_id):
+        flash("Cannot delete a room that still has bookings.", "error")
+        return redirect(url_for("main.index"))
+    delete_room_cascade(room_id)
+    flash("Room deleted.", "success")
     return redirect(url_for("main.index"))
 
 
@@ -339,6 +457,96 @@ def add_booking():
         }
     )
     flash("Booking added.", "success")
+    return redirect(url_for("main.index"))
+
+
+@main_bp.route(
+    "/bookings/<room_id>/<day_id>/<booking_id>/edit",
+    methods=["GET", "POST"],
+)
+@login_required
+def edit_booking(room_id: str, day_id: str, booking_id: str):
+    ref = bookings_collection(room_id, day_id).document(booking_id)
+    snap = ref.get()
+
+    return_mode = (request.values.get("return_bookings_mode") or "").strip()
+    return_rid = (request.values.get("return_bookings_room_id") or "").strip()
+
+    if request.method == "GET":
+        if not snap.exists:
+            flash("Booking not found.", "error")
+            return redirect(url_for("main.index"))
+        data = snap.to_dict() or {}
+        if data.get("user_id") != session["uid"]:
+            flash("You can only edit your own bookings.", "error")
+            return redirect(url_for("main.index"))
+        room_snap = rooms_collection().document(room_id).get()
+        room_name = (
+            str((room_snap.to_dict() or {}).get("name", "Room"))
+            if room_snap.exists
+            else "Room"
+        )
+        if return_mode == "all":
+            cancel_href = url_for("main.index") + "?" + urlencode({"bookings_mode": "all"})
+        elif return_mode == "room" and return_rid:
+            cancel_href = (
+                url_for("main.index")
+                + "?"
+                + urlencode({"bookings_mode": "room", "bookings_room_id": return_rid})
+            )
+        else:
+            cancel_href = url_for("main.index")
+        return render_template(
+            "edit_booking.html",
+            room_id=room_id,
+            room_name=room_name,
+            day_id=day_id,
+            booking_id=booking_id,
+            start_time=str(data.get("start_time", "")),
+            end_time=str(data.get("end_time", "")),
+            return_bookings_mode=return_mode,
+            return_bookings_room_id=return_rid,
+            cancel_href=cancel_href,
+        )
+
+    new_day = (request.form.get("day") or "").strip()
+    start_t = (request.form.get("start_time") or "").strip()
+    end_t = (request.form.get("end_time") or "").strip()
+    return_mode = (request.form.get("return_bookings_mode") or "").strip()
+    return_rid = (request.form.get("return_bookings_room_id") or "").strip()
+
+    ok, err_msg = update_user_booking(
+        session["uid"], room_id, day_id, booking_id, new_day, start_t, end_t
+    )
+    if not ok:
+        flash(err_msg, "error")
+        q: dict[str, str] = {}
+        if return_mode:
+            q["return_bookings_mode"] = return_mode
+        if return_rid:
+            q["return_bookings_room_id"] = return_rid
+        qs = ("?" + urlencode(q)) if q else ""
+        return redirect(
+            url_for(
+                "main.edit_booking",
+                room_id=room_id,
+                day_id=day_id,
+                booking_id=booking_id,
+            )
+            + qs
+        )
+
+    flash("Booking updated.", "success")
+    if return_mode == "all":
+        return redirect(
+            url_for("main.index") + "?" + urlencode({"bookings_mode": "all"})
+        )
+    if return_mode == "room" and return_rid:
+        return redirect(
+            url_for("main.index")
+            + "?"
+            + urlencode({"bookings_mode": "room", "bookings_room_id": return_rid})
+        )
     return redirect(url_for("main.index"))
 
 

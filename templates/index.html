@@ -74,11 +74,18 @@
                     <strong>{{ b.room_name }}</strong>
                     <div>{{ b.day_id }} · {{ b.start_time }} – {{ b.end_time }}</div>
                   </div>
-                  <form method="post" action="{{ url_for('main.delete_booking', room_id=b.room_id, day_id=b.day_id, booking_id=b.id) }}">
-                    <input type="hidden" name="return_bookings_mode" value="{{ bookings_mode }}" />
-                    <input type="hidden" name="return_bookings_room_id" value="{{ bookings_room_id or '' }}" />
-                    <button type="submit" class="secondary">Delete</button>
-                  </form>
+                  <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap">
+                    <a
+                      href="{{ url_for('main.edit_booking', room_id=b.room_id, day_id=b.day_id, booking_id=b.id) }}?return_bookings_mode={{ bookings_mode|urlencode }}&amp;return_bookings_room_id={{ (bookings_room_id or '')|urlencode }}"
+                      class="secondary"
+                      style="display: inline-block; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #334155; color: white; text-decoration: none; font-weight: 600; font-size: 0.875rem"
+                    >Edit</a>
+                    <form method="post" action="{{ url_for('main.delete_booking', room_id=b.room_id, day_id=b.day_id, booking_id=b.id) }}" style="margin: 0">
+                      <input type="hidden" name="return_bookings_mode" value="{{ bookings_mode }}" />
+                      <input type="hidden" name="return_bookings_room_id" value="{{ bookings_room_id or '' }}" />
+                      <button type="submit" class="secondary">Delete</button>
+                    </form>
+                  </div>
                 </div>
               </li>
             {% endfor %}
@@ -95,7 +102,16 @@
     {% if rooms %}
       <ul class="rooms">
         {% for r in rooms %}
-          <li><strong>{{ r.name }}</strong></li>
+          <li>
+            <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap">
+              <strong>{{ r.name }}</strong>
+              {% if session.get('uid') and r.can_delete %}
+                <form method="post" action="{{ url_for('main.delete_room', room_id=r.id) }}" style="margin: 0" onsubmit="return confirm('Delete this room? This cannot be undone.');">
+                  <button type="submit" class="secondary">Delete room</button>
+                </form>
+              {% endif %}
+            </div>
+          </li>
         {% endfor %}
       </ul>
     {% else %}
