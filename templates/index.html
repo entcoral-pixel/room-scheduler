@@ -4,6 +4,32 @@
   <h1>Rooms</h1>
   <p>Rooms are shared by everyone. Sign in to add a room or make a booking.</p>
 
+  <section style="margin-bottom: 2rem">
+    <h2>Bookings on a day</h2>
+    <p style="color: #475569; font-size: 0.9rem">See every room’s bookings for one calendar day (all users).</p>
+    <form method="get" action="{{ url_for('main.index') }}" style="max-width: 24rem; margin-bottom: 1rem">
+      <label for="filter_day">Day</label>
+      <input id="filter_day" name="filter_day" type="date" value="{{ filter_day or '' }}" />
+      <div style="margin-top: 0.75rem">
+        <button type="submit">Show schedule</button>
+      </div>
+    </form>
+    {% if filter_day %}
+      {% if day_bookings %}
+        <ul class="rooms">
+          {% for b in day_bookings %}
+            <li>
+              <a href="{{ url_for('main.room_detail', room_id=b.room_id) }}">{{ b.room_name }}</a>
+              · {{ b.start_time }} – {{ b.end_time }}
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No bookings on that day.</p>
+      {% endif %}
+    {% endif %}
+  </section>
+
   {% if session.get('uid') %}
     <section style="margin-bottom: 2rem">
       <h2>Add a room</h2>
@@ -104,7 +130,7 @@
         {% for r in rooms %}
           <li>
             <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap">
-              <strong>{{ r.name }}</strong>
+              <a href="{{ url_for('main.room_detail', room_id=r.id) }}" style="font-weight: 700; color: #0f172a">{{ r.name }}</a>
               {% if session.get('uid') and r.can_delete %}
                 <form method="post" action="{{ url_for('main.delete_room', room_id=r.id) }}" style="margin: 0" onsubmit="return confirm('Delete this room? This cannot be undone.');">
                   <button type="submit" class="secondary">Delete room</button>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from datetime import date, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -200,6 +201,115 @@ def get_user_bookings_for_room(user_id: str, room_id: str) -> list[dict[str, Any
     return out
 
 
+_OCC_START_MIN = 9 * 60
+_OCC_END_MIN = 18 * 60
+_OCC_WINDOW_MIN = _OCC_END_MIN - _OCC_START_MIN
+
+
+def _merge_intervals_length_minutes(intervals: list[tuple[int, int]]) -> int:
+    cleaned = [(a, b) for a, b in intervals if a < b]
+    if not cleaned:
+        return 0
+    cleaned.sort(key=lambda x: x[0])
+    total = 0
+    cs, ce = cleaned[0]
+    for s, e in cleaned[1:]:
+        if s <= ce:
+            ce = max(ce, e)
+        else:
+            total += ce - cs
+            cs, ce = s, e
+    total += ce - cs
+    return total
+
+
+def occupied_minutes_in_business_window(room_id: str, day_id: str) -> int:
+    intervals: list[tuple[int, int]] = []
+    for b in bookings_collection(room_id, day_id).stream():
+        d = b.to_dict() or {}
+        try:
+            sm = _time_to_minutes(str(d.get("start_time", "")))
+            em = _time_to_minutes(str(d.get("end_time", "")))
+        except ValueError:
+            continue
+        cs = max(sm, _OCC_START_MIN)
+        ce = min(em, _OCC_END_MIN)
+        if cs < ce:
+            intervals.append((cs, ce))
+    return _merge_intervals_length_minutes(intervals)
+
+
+def occupancy_percent_for_day(room_id: str, day_id: str) -> float:
+    occ = occupied_minutes_in_business_window(room_id, day_id)
+    if _OCC_WINDOW_MIN <= 0:
+        return 0.0
+    return min(100.0, round(100.0 * occ / _OCC_WINDOW_MIN, 1))
+
+
+def next_five_day_occupancy_rows(room_id: str) -> list[dict[str, Any]]:
+    today = date.today()
+    rows: list[dict[str, Any]] = []
+    for i in range(5):
+        d = today + timedelta(days=i)
+        ds = d.isoformat()
+        rows.append(
+            {
+                "date": ds,
+                "percent": occupancy_percent_for_day(room_id, ds),
+            }
+        )
+    return rows
+
+
+def get_all_bookings_on_day(day_id: str) -> list[dict[str, Any]]:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_id):
+        return []
+    out: list[dict[str, Any]] = []
+    for room_doc in rooms_collection().stream():
+        rid = room_doc.id
+        rname = str((room_doc.to_dict() or {}).get("name", ""))
+        for b_doc in bookings_collection(rid, day_id).stream():
+            data = b_doc.to_dict() or {}
+            out.append(
+                {
+                    "id": b_doc.id,
+                    "room_id": rid,
+                    "room_name": rname,
+                    "day_id": day_id,
+                    "start_time": str(data.get("start_time", "")),
+                    "end_time": str(data.get("end_time", "")),
+                    "user_id": str(data.get("user_id", "")),
+                }
+            )
+    out.sort(key=lambda x: (x["room_name"].lower(), x["start_time"]))
+    return out
+
+
+def collect_all_bookings_for_room(room_id: str) -> list[dict[str, Any]]:
+    room_snap = rooms_collection().document(room_id).get()
+    if not room_snap.exists:
+        return []
+    room_name = str((room_snap.to_dict() or {}).get("name", "Room"))
+    out: list[dict[str, Any]] = []
+    for day_doc in days_collection(room_id).stream():
+        day_id = day_doc.id
+        for b_doc in bookings_collection(room_id, day_id).stream():
+            data = b_doc.to_dict() or {}
+            out.append(
+                {
+                    "id": b_doc.id,
+                    "room_id": room_id,
+                    "room_name": room_name,
+                    "day_id": day_id,
+                    "start_time": str(data.get("start_time", "")),
+                    "end_time": str(data.get("end_time", "")),
+                    "user_id": str(data.get("user_id", "")),
+                }
+            )
+    out.sort(key=lambda r: (r["day_id"], r["start_time"]))
+    return out
+
+
 def update_user_booking(
     uid: str,
     room_id: str,
@@ -350,12 +460,26 @@ def index():
             err = str(ex).strip() or type(ex).__name__
             flash(f"Could not load bookings: {err}{_firestore_auth_hint(err)}", "error")
 
+    filter_day = (request.args.get("filter_day") or "").strip()
+    day_bookings: list[dict[str, Any]] = []
+    if filter_day:
+        try:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", filter_day):
+                day_bookings = get_all_bookings_on_day(filter_day)
+            else:
+                flash("Invalid day filter.", "error")
+        except Exception as ex:
+            err = str(ex).strip() or type(ex).__name__
+            flash(f"Could not load day schedule: {err}{_firestore_auth_hint(err)}", "error")
+
     return render_template(
         "index.html",
         rooms=room_docs,
         bookings=bookings,
         bookings_mode=bookings_mode,
         bookings_room_id=bookings_room_id,
+        filter_day=filter_day,
+        day_bookings=day_bookings,
     )
 
 
@@ -382,6 +506,32 @@ def add_room():
     )
     flash("Room added.", "success")
     return redirect(url_for("main.index"))
+
+
+@main_bp.route("/rooms/<room_id>")
+def room_detail(room_id: str):
+    room_id = (room_id or "").strip()
+    snap = rooms_collection().document(room_id).get()
+    if not snap.exists:
+        flash("Room not found.", "error")
+        return redirect(url_for("main.index"))
+    data = snap.to_dict() or {}
+    room_name = str(data.get("name", "Room"))
+    try:
+        all_bookings = collect_all_bookings_for_room(room_id)
+        occupancy_rows = next_five_day_occupancy_rows(room_id)
+    except Exception as ex:
+        err = str(ex).strip() or type(ex).__name__
+        flash(f"Could not load room: {err}{_firestore_auth_hint(err)}", "error")
+        return redirect(url_for("main.index"))
+    return render_template(
+        "room_detail.html",
+        room_id=room_id,
+        room_name=room_name,
+        bookings=all_bookings,
+        occupancy_rows=occupancy_rows,
+        current_uid=session.get("uid"),
+    )
 
 
 @main_bp.route("/rooms/<room_id>/delete", methods=["POST"])
