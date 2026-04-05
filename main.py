@@ -206,24 +206,23 @@ _OCC_END_MIN = 18 * 60
 _OCC_WINDOW_MIN = _OCC_END_MIN - _OCC_START_MIN
 
 
-def _merge_intervals_length_minutes(intervals: list[tuple[int, int]]) -> int:
+def _merge_intervals_list(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     cleaned = [(a, b) for a, b in intervals if a < b]
     if not cleaned:
-        return 0
+        return []
     cleaned.sort(key=lambda x: x[0])
-    total = 0
-    cs, ce = cleaned[0]
+    out: list[tuple[int, int]] = [cleaned[0]]
     for s, e in cleaned[1:]:
-        if s <= ce:
-            ce = max(ce, e)
+        ps, pe = out[-1]
+        if s <= pe:
+            out[-1] = (ps, max(pe, e))
         else:
-            total += ce - cs
-            cs, ce = s, e
-    total += ce - cs
-    return total
+            out.append((s, e))
+    return out
 
 
-def occupied_minutes_in_business_window(room_id: str, day_id: str) -> int:
+def merged_busy_intervals_window(room_id: str, day_id: str) -> list[tuple[int, int]]:
+    """Bookings clipped to 09:00–18:00, merged (overlaps combined)."""
     intervals: list[tuple[int, int]] = []
     for b in bookings_collection(room_id, day_id).stream():
         d = b.to_dict() or {}
@@ -236,7 +235,71 @@ def occupied_minutes_in_business_window(room_id: str, day_id: str) -> int:
         ce = min(em, _OCC_END_MIN)
         if cs < ce:
             intervals.append((cs, ce))
-    return _merge_intervals_length_minutes(intervals)
+    return _merge_intervals_list(intervals)
+
+
+def occupied_minutes_in_business_window(room_id: str, day_id: str) -> int:
+    merged = merged_busy_intervals_window(room_id, day_id)
+    return sum(e - s for s, e in merged)
+
+
+def _minutes_to_hhmm(m: int) -> str:
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def earliest_free_slot_next_5_days(room_id: str) -> str | None:
+    today = date.today()
+    for i in range(5):
+        d = today + timedelta(days=i)
+        ds = d.isoformat()
+        busy = merged_busy_intervals_window(room_id, ds)
+        cursor = _OCC_START_MIN
+        for s, e in busy:
+            if cursor < s:
+                return f"{ds} · {_minutes_to_hhmm(cursor)}"
+            cursor = max(cursor, e)
+        if cursor < _OCC_END_MIN:
+            return f"{ds} · {_minutes_to_hhmm(cursor)}"
+    return None
+
+
+def calendar_week_data(room_id: str) -> list[dict[str, Any]]:
+    today = date.today()
+    weekday_short = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    days: list[dict[str, Any]] = []
+    for i in range(5):
+        d = today + timedelta(days=i)
+        ds = d.isoformat()
+        segments: list[dict[str, Any]] = []
+        for b in bookings_collection(room_id, ds).stream():
+            data = b.to_dict() or {}
+            try:
+                sm = _time_to_minutes(str(data.get("start_time", "")))
+                em = _time_to_minutes(str(data.get("end_time", "")))
+            except ValueError:
+                continue
+            cs = max(sm, _OCC_START_MIN)
+            ce = min(em, _OCC_END_MIN)
+            if cs >= ce:
+                continue
+            top_pct = (cs - _OCC_START_MIN) / _OCC_WINDOW_MIN * 100.0
+            height_pct = (ce - cs) / _OCC_WINDOW_MIN * 100.0
+            segments.append(
+                {
+                    "top_pct": round(top_pct, 2),
+                    "height_pct": max(round(height_pct, 2), 2.5),
+                    "label": f"{_minutes_to_hhmm(cs)}–{_minutes_to_hhmm(ce)}",
+                }
+            )
+        days.append(
+            {
+                "date": ds,
+                "date_short": f"{d.strftime('%b')} {d.day}",
+                "weekday": weekday_short[d.weekday()],
+                "segments": segments,
+            }
+        )
+    return days
 
 
 def occupancy_percent_for_day(room_id: str, day_id: str) -> float:
@@ -520,6 +583,8 @@ def room_detail(room_id: str):
     try:
         all_bookings = collect_all_bookings_for_room(room_id)
         occupancy_rows = next_five_day_occupancy_rows(room_id)
+        earliest_free = earliest_free_slot_next_5_days(room_id)
+        calendar_days = calendar_week_data(room_id)
     except Exception as ex:
         err = str(ex).strip() or type(ex).__name__
         flash(f"Could not load room: {err}{_firestore_auth_hint(err)}", "error")
@@ -530,6 +595,8 @@ def room_detail(room_id: str):
         room_name=room_name,
         bookings=all_bookings,
         occupancy_rows=occupancy_rows,
+        earliest_free=earliest_free,
+        calendar_days=calendar_days,
         current_uid=session.get("uid"),
     )
 
