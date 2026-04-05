@@ -2,7 +2,7 @@
 {% block title %}Rooms — Room Scheduler{% endblock %}
 {% block content %}
   <h1>Rooms</h1>
-  <p>Rooms are shared by everyone. Sign in to add a room.</p>
+  <p>Rooms are shared by everyone. Sign in to add a room or make a booking.</p>
 
   {% if session.get('uid') %}
     <section style="margin-bottom: 2rem">
@@ -20,7 +20,7 @@
       <h2>Book a room</h2>
       <form method="post" action="{{ url_for('main.add_booking') }}">
         <label for="room_id">Room</label>
-        <select id="room_id" name="room_id" required style="max-width: 24rem; width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #cbd5e1; border-radius: 0.375rem;">
+        <select id="room_id" name="room_id" required>
           <option value="">Select a room</option>
           {% for r in rooms %}
             <option value="{{ r.id }}">{{ r.name }}</option>
@@ -53,7 +53,7 @@
       <form method="get" action="{{ url_for('main.index') }}" style="max-width: 24rem; margin-bottom: 1rem">
         <input type="hidden" name="bookings_mode" value="room" />
         <label for="bookings_room_id">Show my bookings for a room</label>
-        <select id="bookings_room_id" name="bookings_room_id" required style="max-width: 24rem; width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #cbd5e1; border-radius: 0.375rem;">
+        <select id="bookings_room_id" name="bookings_room_id" required>
           <option value="">Select a room</option>
           {% for r in rooms %}
             <option value="{{ r.id }}" {% if bookings_room_id == r.id %}selected{% endif %}>{{ r.name }}</option>
@@ -69,14 +69,14 @@
           <ul class="rooms">
             {% for b in bookings %}
               <li>
-                <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center">
+                <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap">
                   <div>
                     <strong>{{ b.room_name }}</strong>
-                    <div>{{ b.day }} | {{ b.start_time }} - {{ b.end_time }}</div>
+                    <div>{{ b.day_id }} · {{ b.start_time }} – {{ b.end_time }}</div>
                   </div>
-                  <form method="post" action="{{ url_for('main.delete_booking', room_id=b.room_id, day_id=b.day, booking_id=b.id) }}">
-                    <input type="hidden" name="bookings_mode" value="{{ bookings_mode }}" />
-                    <input type="hidden" name="bookings_room_id" value="{{ bookings_room_id or '' }}" />
+                  <form method="post" action="{{ url_for('main.delete_booking', room_id=b.room_id, day_id=b.day_id, booking_id=b.id) }}">
+                    <input type="hidden" name="return_bookings_mode" value="{{ bookings_mode }}" />
+                    <input type="hidden" name="return_bookings_room_id" value="{{ bookings_room_id or '' }}" />
                     <button type="submit" class="secondary">Delete</button>
                   </form>
                 </div>
@@ -84,7 +84,7 @@
             {% endfor %}
           </ul>
         {% else %}
-          <p>No bookings found for this view.</p>
+          <p>No bookings in this view.</p>
         {% endif %}
       {% endif %}
     </section>
