@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-import uuid
 from datetime import date, timedelta
 from functools import wraps
 from pathlib import Path
@@ -16,8 +16,10 @@ from firebase_admin import auth as firebase_auth
 from firebase_admin import credentials
 from firebase_admin import firestore as firebase_firestore
 from flask import Blueprint, Flask, flash, redirect, render_template, request, session, url_for
+from google.api_core import exceptions as gapi_exceptions
 from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
+from google.cloud.firestore_v1.transaction import transactional
 
 _ROOT = Path(__file__).resolve().parent
 load_dotenv(_ROOT / ".env")
@@ -76,6 +78,10 @@ def normalize_room_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").strip())
 
 
+def stable_room_document_id(normalized_name: str) -> str:
+    return hashlib.sha256(normalized_name.casefold().encode("utf-8")).hexdigest()
+
+
 def room_name_exists(normalized: str) -> bool:
     target = normalized.casefold()
     for doc in rooms_collection().stream():
@@ -128,15 +134,22 @@ def intervals_overlap_minutes(
     return start_a < end_b and start_b < end_a
 
 
-def ensure_day_document(room_id: str, day_id: str) -> None:
-    ref = days_collection(room_id).document(day_id)
-    ref.set({"date": day_id}, merge=True)
+class BookingTxnError(Exception):
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
 
 
-def booking_clashes_room_day(
-    room_id: str, day_id: str, start_m: int, end_m: int, exclude_booking_id: str | None = None
+def _booking_clashes_in_transaction(
+    transaction,
+    room_id: str,
+    day_id: str,
+    start_m: int,
+    end_m: int,
+    exclude_booking_id: str | None,
 ) -> bool:
-    for b in bookings_collection(room_id, day_id).stream():
+    for b in bookings_collection(room_id, day_id).stream(transaction=transaction):
         if exclude_booking_id and b.id == exclude_booking_id:
             continue
         d = b.to_dict() or {}
@@ -148,6 +161,114 @@ def booking_clashes_room_day(
         if intervals_overlap_minutes(start_m, end_m, os_m, oe_m):
             return True
     return False
+
+
+@transactional
+def _txn_add_booking(
+    transaction,
+    room_id: str,
+    day_id: str,
+    uid: str,
+    start_norm: str,
+    end_norm: str,
+    sm: int,
+    em: int,
+) -> None:
+    if _booking_clashes_in_transaction(transaction, room_id, day_id, sm, em, None):
+        raise BookingTxnError("That time overlaps another booking for this room.")
+    day_ref = days_collection(room_id).document(day_id)
+    transaction.set(day_ref, {"date": day_id}, merge=True)
+    bref = bookings_collection(room_id, day_id).document()
+    transaction.set(
+        bref,
+        {
+            "user_id": uid,
+            "start_time": start_norm,
+            "end_time": end_norm,
+            "created_at": SERVER_TIMESTAMP,
+        },
+    )
+
+
+@transactional
+def _txn_update_booking_same_day(
+    transaction,
+    booking_ref: firestore.DocumentReference,
+    room_id: str,
+    day_id: str,
+    booking_id: str,
+    uid: str,
+    sm: int,
+    em: int,
+    start_norm: str,
+    end_norm: str,
+) -> None:
+    snap = booking_ref.get(transaction=transaction)
+    if not snap.exists:
+        raise BookingTxnError("Booking not found.")
+    if snap.id != booking_id:
+        raise BookingTxnError("Booking not found.")
+    if (snap.to_dict() or {}).get("user_id") != uid:
+        raise BookingTxnError("You can only edit your own bookings.")
+    if _booking_clashes_in_transaction(
+        transaction, room_id, day_id, sm, em, booking_id
+    ):
+        raise BookingTxnError("That time overlaps another booking for this room.")
+    transaction.update(booking_ref, {"start_time": start_norm, "end_time": end_norm})
+
+
+@transactional
+def _txn_move_booking(
+    transaction,
+    old_ref: firestore.DocumentReference,
+    room_id: str,
+    new_day_id: str,
+    booking_id: str,
+    uid: str,
+    sm: int,
+    em: int,
+    start_norm: str,
+    end_norm: str,
+) -> None:
+    snap = old_ref.get(transaction=transaction)
+    if not snap.exists:
+        raise BookingTxnError("Booking not found.")
+    if snap.id != booking_id:
+        raise BookingTxnError("Booking not found.")
+    data = snap.to_dict() or {}
+    if data.get("user_id") != uid:
+        raise BookingTxnError("You can only edit your own bookings.")
+    if _booking_clashes_in_transaction(transaction, room_id, new_day_id, sm, em, None):
+        raise BookingTxnError("That time overlaps another booking for this room.")
+    ca = data.get("created_at")
+    payload: dict[str, Any] = {
+        "user_id": uid,
+        "start_time": start_norm,
+        "end_time": end_norm,
+        "created_at": ca if ca is not None else SERVER_TIMESTAMP,
+    }
+    day_ref = days_collection(room_id).document(new_day_id)
+    transaction.set(day_ref, {"date": new_day_id}, merge=True)
+    new_ref = bookings_collection(room_id, new_day_id).document()
+    transaction.set(new_ref, payload)
+    transaction.delete(old_ref)
+
+
+@transactional
+def _txn_delete_booking(
+    transaction,
+    booking_ref: firestore.DocumentReference,
+    booking_id: str,
+    uid: str,
+) -> None:
+    snap = booking_ref.get(transaction=transaction)
+    if not snap.exists:
+        raise BookingTxnError("Booking not found.")
+    if snap.id != booking_id:
+        raise BookingTxnError("Booking not found.")
+    if (snap.to_dict() or {}).get("user_id") != uid:
+        raise BookingTxnError("You can only delete your own bookings.")
+    transaction.delete(booking_ref)
 
 
 def get_user_bookings_all(user_id: str) -> list[dict[str, Any]]:
@@ -382,13 +503,6 @@ def update_user_booking(
     start_t: str,
     end_t: str,
 ) -> tuple[bool, str]:
-    ref = bookings_collection(room_id, old_day_id).document(booking_id)
-    snap = ref.get()
-    if not snap.exists:
-        return False, "Booking not found."
-    data = snap.to_dict() or {}
-    if data.get("user_id") != uid:
-        return False, "You can only edit your own bookings."
     if not rooms_collection().document(room_id).get().exists:
         return False, "That room no longer exists."
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", new_day_id):
@@ -404,32 +518,40 @@ def update_user_booking(
     start_norm = _normalize_time_display(start_t)
     end_norm = _normalize_time_display(end_t)
 
-    if new_day_id == old_day_id:
-        if booking_clashes_room_day(
-            room_id, old_day_id, sm, em, exclude_booking_id=booking_id
-        ):
-            return False, "That time overlaps another booking for this room."
-        ref.update({"start_time": start_norm, "end_time": end_norm})
+    ref = bookings_collection(room_id, old_day_id).document(booking_id)
+    client = _firestore_client()
+
+    try:
+        if new_day_id == old_day_id:
+            _txn_update_booking_same_day(
+                client.transaction(),
+                ref,
+                room_id,
+                old_day_id,
+                booking_id,
+                uid,
+                sm,
+                em,
+                start_norm,
+                end_norm,
+            )
+            return True, ""
+
+        _txn_move_booking(
+            client.transaction(),
+            ref,
+            room_id,
+            new_day_id,
+            booking_id,
+            uid,
+            sm,
+            em,
+            start_norm,
+            end_norm,
+        )
         return True, ""
-
-    if booking_clashes_room_day(room_id, new_day_id, sm, em, None):
-        return False, "That time overlaps another booking for this room."
-
-    payload: dict[str, Any] = {
-        "user_id": uid,
-        "start_time": start_norm,
-        "end_time": end_norm,
-    }
-    ca = data.get("created_at")
-    payload["created_at"] = ca if ca is not None else SERVER_TIMESTAMP
-
-    ensure_day_document(room_id, new_day_id)
-    new_ref = bookings_collection(room_id, new_day_id).document()
-    batch = _firestore_client().batch()
-    batch.set(new_ref, payload)
-    batch.delete(ref)
-    batch.commit()
-    return True, ""
+    except BookingTxnError as err:
+        return False, err.message
 
 
 def login_required(view):
@@ -559,14 +681,18 @@ def add_room():
     if room_name_exists(name):
         flash("A room with that name already exists.", "error")
         return redirect(url_for("main.index"))
-    room_id = uuid.uuid4().hex
-    rooms_collection().document(room_id).set(
-        {
-            "name": name,
-            "created_by_uid": session["uid"],
-            "created_at": SERVER_TIMESTAMP,
-        }
-    )
+    room_id = stable_room_document_id(name)
+    try:
+        rooms_collection().document(room_id).create(
+            {
+                "name": name,
+                "created_by_uid": session["uid"],
+                "created_at": SERVER_TIMESTAMP,
+            }
+        )
+    except gapi_exceptions.Conflict:
+        flash("A room with that name already exists.", "error")
+        return redirect(url_for("main.index"))
     flash("Room added.", "success")
     return redirect(url_for("main.index"))
 
@@ -658,21 +784,22 @@ def add_booking():
         return redirect(url_for("main.index"))
 
     day_id = day
-    if booking_clashes_room_day(room_id, day_id, sm, em):
-        flash("That time overlaps another booking for this room.", "error")
-        return redirect(url_for("main.index"))
-
-    ensure_day_document(room_id, day_id)
     start_norm = _normalize_time_display(start_t)
     end_norm = _normalize_time_display(end_t)
-    bookings_collection(room_id, day_id).add(
-        {
-            "user_id": session["uid"],
-            "start_time": start_norm,
-            "end_time": end_norm,
-            "created_at": SERVER_TIMESTAMP,
-        }
-    )
+    try:
+        _txn_add_booking(
+            _firestore_client().transaction(),
+            room_id,
+            day_id,
+            session["uid"],
+            start_norm,
+            end_norm,
+            sm,
+            em,
+        )
+    except BookingTxnError as err:
+        flash(err.message, "error")
+        return redirect(url_for("main.index"))
     flash("Booking added.", "success")
     return redirect(url_for("main.index"))
 
@@ -773,15 +900,16 @@ def edit_booking(room_id: str, day_id: str, booking_id: str):
 @login_required
 def delete_booking(room_id: str, day_id: str, booking_id: str):
     ref = bookings_collection(room_id, day_id).document(booking_id)
-    snap = ref.get()
-    if not snap.exists:
-        flash("Booking not found.", "error")
+    try:
+        _txn_delete_booking(
+            _firestore_client().transaction(),
+            ref,
+            booking_id,
+            session["uid"],
+        )
+    except BookingTxnError as err:
+        flash(err.message, "error")
         return redirect(url_for("main.index") + _bookings_index_redirect_args())
-    data = snap.to_dict() or {}
-    if data.get("user_id") != session["uid"]:
-        flash("You can only delete your own bookings.", "error")
-        return redirect(url_for("main.index") + _bookings_index_redirect_args())
-    ref.delete()
     flash("Booking deleted.", "success")
     return redirect(url_for("main.index") + _bookings_index_redirect_args())
 
